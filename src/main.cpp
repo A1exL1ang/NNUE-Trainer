@@ -11,39 +11,39 @@
 #include <numeric>
 
 // Constants
-const int threadCount = 6;
-const int dataLoadSz = (1 << 20);
-const int batchSize = 16384;
-const int epochSize = 98304000;
-const int maxEpochs = 100000;
-const int fenSkip = 20; // (1 / fenSkip) chance of using fen
+const int THREAD_COUNT = 6;
+const int DATA_LOAD_SZ = (1 << 20);
+const int BATCH_SIZE = 16384;
+const int EPOCH_SIZE = 98304000;
+const int MAX_EPOCHS = 100000;
+const int FEN_SKIP = 20; // (1 / FEN_SKIP) chance of using fen
 
 // Adam
-const double beta1 = 0.9;
-const double beta2 = 0.999;
+const double BETA_1 = 0.9;
+const double BETA_2 = 0.999;
 
 // Eval weight in loss and eval scale
-const double evalWeight = 0.9;
-const double evalScale = 400; 
+const double EVAL_WEIGHT = 0.9;
+const double EVAL_SCALE = 400; 
 
 // Learning rate and cosine annealing
-const double lrBase = 0.001;
-const double lrDecay = 0.99692;
-const int lrTransition = 350;
+const double LR_BASE = 0.001;
+const double LR_DECAY = 0.99692;
+const int LR_TRANSITION = 350;
 
-const double cosineMin = 0.0001;
-const double cosineMax = 0.0004;
-const double cosineIntervalMultiplier = 1.5;
-const int cosineIntervalBase = 20;
+const double COSINE_MIN = 0.0001;
+const double COSINE_MAX = 0.0004;
+const double COSINE_INTERVAL_MULTIPLIER = 1.5;
+const int COSINE_INTERVAL_BASE = 20;
 
 // Network stuff
-const int kingBucketCount = 10;
-const int outputWeightBucketCount = 8;
-const int singleBucketSize = 768;
-const int inputHalf = singleBucketSize * kingBucketCount;
-const int hiddenHalf = 512;
+const int KING_BUCKET_COUNT = 10;
+const int OUTPUT_WEIGHT_BUCKET_COUNT = 8;
+const int SINGLE_BUCKET_SIZE = 768;
+const int INPUT_HALF = SINGLE_BUCKET_SIZE * KING_BUCKET_COUNT;
+const int HIDDEN_HALF = 512;
 
-const int bucketId[64] = {
+const int BUCKET_ID[64] = {
     0, 1, 2, 3, 3, 2, 1, 0,
     4, 5, 6, 7, 7, 6, 5, 4,
     8, 8, 8, 8, 8, 8, 8, 8,
@@ -59,19 +59,19 @@ const double Q1 = 256;
 const double Q2 = 256;
 
 // The model itself
-struct neuralNetwork{
-    double W1[inputHalf * hiddenHalf];
-    double B1[hiddenHalf];
-    double W2[outputWeightBucketCount * hiddenHalf * 2];
-    double B2[outputWeightBucketCount];
+struct NeuralNetwork{
+    double W1[INPUT_HALF * HIDDEN_HALF];
+    double B1[HIDDEN_HALF];
+    double W2[OUTPUT_WEIGHT_BUCKET_COUNT * HIDDEN_HALF * 2];
+    double B2[OUTPUT_WEIGHT_BUCKET_COUNT];
 };
-neuralNetwork model;
-neuralNetwork momentum;
-neuralNetwork rms;
-neuralNetwork threadGrad[threadCount];
+NeuralNetwork model;
+NeuralNetwork momentum;
+NeuralNetwork rms;
+NeuralNetwork threadGrad[THREAD_COUNT];
 
 // Error
-double errorAccumulation[threadCount];
+double errorAccumulation[THREAD_COUNT];
 
 // Export 
 const int iterationReport = 200;
@@ -80,7 +80,7 @@ int exportCheckpointNumber;
 int exportNetworkNumber;
 
 // Data struct for storing sets of features
-struct data{
+struct Data{
     int stmSz;
     int stmFeatures[32];
     
@@ -118,12 +118,12 @@ struct data{
 };
 
 // Data loader
-namespace dataLoader{
-    data currentData[dataLoadSz];
-    data nextData[dataLoadSz];
+namespace DataLoader{
+    Data currentData[DATA_LOAD_SZ];
+    Data nextData[DATA_LOAD_SZ];
     std::mt19937 rng(69);
 
-    int permuteShuffle[dataLoadSz];
+    int permuteShuffle[DATA_LOAD_SZ];
     int position = 0;
 
     binpack::CompressedTrainingDataEntryReader reader("");
@@ -136,14 +136,14 @@ namespace dataLoader{
         return (col == perspective ? 0 : 384) 
             + 64 * static_cast<int>(piece)
             + (perspective == chess::Color::White ? static_cast<int>(sq) : (static_cast<int>(sq) ^ 56))
-            + bucketId[static_cast<int>(ksq) ^ (perspective == chess::Color::Black ? 56 : 0)] * singleBucketSize;
+            + BUCKET_ID[static_cast<int>(ksq) ^ (perspective == chess::Color::Black ? 56 : 0)] * SINGLE_BUCKET_SIZE;
     }
 
     void loadNext(){
         int counter = 0;
-        std::string arr[dataLoadSz];
+        std::string arr[DATA_LOAD_SZ];
 
-        while (counter < dataLoadSz){
+        while (counter < DATA_LOAD_SZ){
             // If we finished, go back to the beginning
             if (!reader.hasNext()){
                 reader = binpack::CompressedTrainingDataEntryReader(inp);
@@ -159,8 +159,8 @@ namespace dataLoader{
                 continue;
             }
 
-            // Probability of using is: (1 / fenSkip)
-            if (rng() % fenSkip != 0){
+            // Probability of using is: (1 / FEN_SKIP)
+            if (rng() % FEN_SKIP != 0){
                 continue;
             }
 
@@ -181,7 +181,7 @@ namespace dataLoader{
             }
 
             // Note that score and result (-1/0/1) should be relative to the player to move and score should be on a centipawn scale
-            d.setScore(entry.score / evalScale);
+            d.setScore(entry.score / EVAL_SCALE);
             d.setWDL(entry.result == -1 ? 0.0 : entry.result == 0 ? 0.5 : 1.0);
 
             // Increment counter
@@ -190,9 +190,9 @@ namespace dataLoader{
     }
 
     void advanceDataLoader(){
-        position += batchSize;
+        position += BATCH_SIZE;
 
-        if (position == dataLoadSz){
+        if (position == DATA_LOAD_SZ){
             // Join thread that's reading nextData
             if (readingThread.joinable()){
                 readingThread.join();
@@ -203,7 +203,7 @@ namespace dataLoader{
             position = 0;
 
             // Begin a new thread to read nextData
-            readingThread = std::thread(dataLoader::loadNext);
+            readingThread = std::thread(DataLoader::loadNext);
         }
     }
 
@@ -212,8 +212,8 @@ namespace dataLoader{
         reader = binpack::CompressedTrainingDataEntryReader(inp);
 
         std::default_random_engine generator(69);
-        std::iota(permuteShuffle, permuteShuffle + dataLoadSz, 0);
-        std::shuffle(permuteShuffle, permuteShuffle + dataLoadSz, generator);
+        std::iota(permuteShuffle, permuteShuffle + DATA_LOAD_SZ, 0);
+        std::shuffle(permuteShuffle, permuteShuffle + DATA_LOAD_SZ, generator);
 
         loadNext();
         std::swap(currentData, nextData);
@@ -242,19 +242,19 @@ inline double dSigmoid(double value){
 }
 
 inline double error(double output, double eval, double wdl){
-    double expected = evalWeight * sigmoid(eval) + (1 - evalWeight) * wdl;
+    double expected = EVAL_WEIGHT * sigmoid(eval) + (1 - EVAL_WEIGHT) * wdl;
     return pow(sigmoid(output) - expected, 2);
 }
 
 inline double dError(double output, double eval, double wdl){
-    double expected = evalWeight * sigmoid(eval) + (1 - evalWeight) * wdl;
+    double expected = EVAL_WEIGHT * sigmoid(eval) + (1 - EVAL_WEIGHT) * wdl;
     return 2 * (sigmoid(output) - expected) * dSigmoid(output);
 }
 
 inline void adamUpdate(double grad, double lr, double &targetValue, double &momentumValue, double &rmsValue){
     // Apply update
-    momentumValue = momentumValue * beta1 + (1.0 - beta1) * grad;
-    rmsValue = rmsValue * beta2 + (1.0 - beta2) * grad * grad;
+    momentumValue = momentumValue * BETA_1 + (1.0 - BETA_1) * grad;
+    rmsValue = rmsValue * BETA_2 + (1.0 - BETA_2) * grad * grad;
 
     // Apply gradient
     targetValue -= lr * momentumValue / (static_cast<double>(sqrt(rmsValue)) + 1e-8);    
@@ -289,25 +289,25 @@ inline void exportNetworkQuantized(){
     std::ofstream outFile("nnueweights_" + std::to_string(sessionId) + "_" + std::to_string(exportNetworkNumber) + ".bin", std::ios::out | std::ios::binary);
     exportNetworkNumber++;
 
-    int16_t qW1[inputHalf * hiddenHalf];
-    int16_t qB1[hiddenHalf];
-    int16_t qW2[outputWeightBucketCount * hiddenHalf * 2];
-    int16_t qB2[outputWeightBucketCount];
+    int16_t qW1[INPUT_HALF * HIDDEN_HALF];
+    int16_t qB1[HIDDEN_HALF];
+    int16_t qW2[OUTPUT_WEIGHT_BUCKET_COUNT * HIDDEN_HALF * 2];
+    int16_t qB2[OUTPUT_WEIGHT_BUCKET_COUNT];
     
     // We need to convert these doubles to int16. Let's multiply W1 and B1 by Q1,
     // W2 by Q2, and B2 by Q1 * Q2 so that we can factor Q1 * Q2 out of everyone.
     // Then to get back the original value, we divide by Q1 * Q2
 
-    for (int i = 0; i < inputHalf * hiddenHalf; i++){
+    for (int i = 0; i < INPUT_HALF * HIDDEN_HALF; i++){
         qW1[i] = round(model.W1[i] * Q1);
     }
-    for (int i = 0; i < hiddenHalf; i++){
+    for (int i = 0; i < HIDDEN_HALF; i++){
         qB1[i] = round(model.B1[i] * Q1);
     }
-    for (int i = 0; i < outputWeightBucketCount * hiddenHalf * 2; i++){
+    for (int i = 0; i < OUTPUT_WEIGHT_BUCKET_COUNT * HIDDEN_HALF * 2; i++){
         qW2[i] = round(model.W2[i] * Q2);
     }
-    for (int i = 0; i < outputWeightBucketCount; i++){
+    for (int i = 0; i < OUTPUT_WEIGHT_BUCKET_COUNT; i++){
         qB2[i] = round(model.B2[i] * Q1 * Q2);
     }
 
@@ -325,67 +325,67 @@ void initWithRandomWeights(){
 
     std::default_random_engine generator(69);
     std::normal_distribution<double> random1(0, sqrt(2.0 / 20));
-    std::normal_distribution<double> random2(0, sqrt(2.0 / (hiddenHalf * 2)));
+    std::normal_distribution<double> random2(0, sqrt(2.0 / (HIDDEN_HALF * 2)));
     std::normal_distribution<double> random3(0, 0.01);
 
-    for (int i = 0; i < inputHalf * hiddenHalf; i++){
+    for (int i = 0; i < INPUT_HALF * HIDDEN_HALF; i++){
         model.W1[i] = random1(generator);
     }
-    for (int i = 0; i < outputWeightBucketCount * hiddenHalf * 2; i++){
+    for (int i = 0; i < OUTPUT_WEIGHT_BUCKET_COUNT * HIDDEN_HALF * 2; i++){
         model.W2[i] = random2(generator);
     }
-    for (int i = 0; i < hiddenHalf; i++){
+    for (int i = 0; i < HIDDEN_HALF; i++){
         model.B1[i] = random3(generator);
     }
-    for (int i = 0; i < outputWeightBucketCount; i++){
+    for (int i = 0; i < OUTPUT_WEIGHT_BUCKET_COUNT; i++){
         model.B2[i] = random3(generator);
     }
 }
 
-void proccessData(int curThread, data *dat){
-    neuralNetwork &grad = threadGrad[curThread];
+void proccessData(int curThread, Data *dat){
+    NeuralNetwork &grad = threadGrad[curThread];
 
-    for (int batchIdx = curThread; batchIdx < batchSize; batchIdx += threadCount){
+    for (int batchIdx = curThread; batchIdx < BATCH_SIZE; batchIdx += THREAD_COUNT){
 
         /********************************************STEP 1********************************************/
 
-        data &entry = dat[batchIdx];
+        Data &entry = dat[batchIdx];
 
-        double accumulator[hiddenHalf * 2];
+        double accumulator[HIDDEN_HALF * 2];
         double output = 0;
 
         double gradZ2;
-        double gradA1[hiddenHalf * 2];
-        double gradZ1[hiddenHalf * 2];
+        double gradA1[HIDDEN_HALF * 2];
+        double gradZ1[HIDDEN_HALF * 2];
 
         int outputWeightBucket = entry.calculateOutputBucket();
-        int outputWeightsIndex = outputWeightBucket * hiddenHalf * 2;
+        int outputWeightsIndex = outputWeightBucket * HIDDEN_HALF * 2;
 
         /********************************************STEP 2********************************************/
         
         // Initialize with B1
-        for (int i = 0; i < hiddenHalf; i++){
-            accumulator[i] = accumulator[i + hiddenHalf] = model.B1[i];
+        for (int i = 0; i < HIDDEN_HALF; i++){
+            accumulator[i] = accumulator[i + HIDDEN_HALF] = model.B1[i];
         }
 
         // Calculate accumulator
         for (int f = 0; f < entry.stmSz; f++){
-            int start = entry.stmFeatures[f] * hiddenHalf;
+            int start = entry.stmFeatures[f] * HIDDEN_HALF;
 
-            for (int i = 0; i < hiddenHalf; i++){
+            for (int i = 0; i < HIDDEN_HALF; i++){
                 accumulator[i] += model.W1[start + i];
             }
         }
         for (int f = 0; f < entry.enemySz; f++){
-            int start = entry.enemyFeatures[f] * hiddenHalf;
+            int start = entry.enemyFeatures[f] * HIDDEN_HALF;
 
-            for (int i = 0; i < hiddenHalf; i++){
-                accumulator[i + hiddenHalf] += model.W1[start + i];
+            for (int i = 0; i < HIDDEN_HALF; i++){
+                accumulator[i + HIDDEN_HALF] += model.W1[start + i];
             }
         }
 
         // Make the inference
-        for (int i = 0; i < hiddenHalf * 2; i++){
+        for (int i = 0; i < HIDDEN_HALF * 2; i++){
             output += crelu(accumulator[i]) * model.W2[i + outputWeightsIndex];
         }
         output += model.B2[outputWeightBucket];
@@ -402,28 +402,28 @@ void proccessData(int curThread, data *dat){
         grad.B2[outputWeightBucket] += gradZ2;
         
         // Calculate dW2, dA1, dZ1
-        for (int i = 0; i < hiddenHalf * 2; i++){
+        for (int i = 0; i < HIDDEN_HALF * 2; i++){
             grad.W2[i + outputWeightsIndex] += gradZ2 * crelu(accumulator[i]);
             gradA1[i] = model.W2[i + outputWeightsIndex] * gradZ2;
             gradZ1[i] = gradA1[i] * dCrelu(accumulator[i]);
         }
         
         // Calculate dB1 (note that this single bias has influence on 2 nodes)
-        for (int i = 0; i < hiddenHalf; i++){
-            grad.B1[i] += gradZ1[i] + gradZ1[i + hiddenHalf];
+        for (int i = 0; i < HIDDEN_HALF; i++){
+            grad.B1[i] += gradZ1[i] + gradZ1[i + HIDDEN_HALF];
         }
 
         // Calculate dW1 (note that a single weight can influence 2 nodes)
         for (int f = 0; f < entry.stmSz; f++){
-            int start = entry.stmFeatures[f] * hiddenHalf;
-            for (int i = 0; i < hiddenHalf; i++){
+            int start = entry.stmFeatures[f] * HIDDEN_HALF;
+            for (int i = 0; i < HIDDEN_HALF; i++){
                 grad.W1[start + i] += gradZ1[i];
             }
         }
         for (int f = 0; f < entry.enemySz; f++){
-            int start = entry.enemyFeatures[f] * hiddenHalf;
-            for (int i = 0; i < hiddenHalf; i++){
-                grad.W1[start + i] += gradZ1[i + hiddenHalf];
+            int start = entry.enemyFeatures[f] * HIDDEN_HALF;
+            for (int i = 0; i < HIDDEN_HALF; i++){
+                grad.W1[start + i] += gradZ1[i + HIDDEN_HALF];
             }
         }
     }
@@ -431,36 +431,36 @@ void proccessData(int curThread, data *dat){
 
 void applyGradients(int curThread, double lr){
     // Apply gradients to W1
-    for (int i = curThread; i < inputHalf * hiddenHalf; i += threadCount){
+    for (int i = curThread; i < INPUT_HALF * HIDDEN_HALF; i += THREAD_COUNT){
         double grad = 0;
-        for (int td = 0; td < threadCount; td++){
+        for (int td = 0; td < THREAD_COUNT; td++){
             grad += threadGrad[td].W1[i];
         }
         adamUpdate(grad, lr, model.W1[i], momentum.W1[i], rms.W1[i]);
     }
 
     // Apply gradients to B1
-    for (int i = curThread; i < hiddenHalf; i += threadCount){
+    for (int i = curThread; i < HIDDEN_HALF; i += THREAD_COUNT){
         double grad = 0;
-        for (int td = 0; td < threadCount; td++){
+        for (int td = 0; td < THREAD_COUNT; td++){
             grad += threadGrad[td].B1[i];
         }
         adamUpdate(grad, lr, model.B1[i], momentum.B1[i], rms.B1[i]);
     }
 
     // Apply gradients to W2
-    for (int i = curThread; i < outputWeightBucketCount * hiddenHalf * 2; i += threadCount){
+    for (int i = curThread; i < OUTPUT_WEIGHT_BUCKET_COUNT * HIDDEN_HALF * 2; i += THREAD_COUNT){
         double grad = 0;
-        for (int td = 0; td < threadCount; td++){
+        for (int td = 0; td < THREAD_COUNT; td++){
             grad += threadGrad[td].W2[i];
         }
         adamUpdate(grad, lr, model.W2[i], momentum.W2[i], rms.W2[i]);
     }
 
     // Apply gradients to B2
-    for (int i = curThread; i < outputWeightBucketCount; i += threadCount){
+    for (int i = curThread; i < OUTPUT_WEIGHT_BUCKET_COUNT; i += THREAD_COUNT){
         double grad = 0;
-        for (int td = 0; td < threadCount; td++){
+        for (int td = 0; td < THREAD_COUNT; td++){
             grad += threadGrad[td].B2[i];
         }
         adamUpdate(grad, lr, model.B2[i], momentum.B2[i], rms.B2[i]);
@@ -470,15 +470,15 @@ void applyGradients(int curThread, double lr){
 void train(std::string inputPath, std::string reportLossPath){
     // Intialize
     std::ofstream outputLoss(reportLossPath);
-    dataLoader::init(inputPath);
+    DataLoader::init(inputPath);
 
     long long startTime = getTime();
-    double lr = lrBase;
+    double lr = LR_BASE;
 
-    int cosineInterval = cosineIntervalBase;
+    int cosineInterval = COSINE_INTERVAL_BASE;
     int cosineCounter = -1;
 
-    for (int epoch = 1; epoch <= maxEpochs; epoch++){
+    for (int epoch = 1; epoch <= MAX_EPOCHS; epoch++){
         double epochError = 0;
         double iterationReportError = 0;
 
@@ -487,99 +487,99 @@ void train(std::string inputPath, std::string reportLossPath){
         long long epochStartTime = getTime();
         
         // Print starting epoch and learning rate
-        if (epoch <= lrTransition){
-            std::cout<<"Starting Epoch: "<<epoch
-                     <<", Learning Rate: "  <<lr
-                     <<std::endl;
+        if (epoch <= LR_TRANSITION){
+            std::cout << "Starting Epoch: "  << epoch
+                      << ", Learning Rate: " << lr
+                      << std::endl;
         }
         else{
-            std::cout<<"Starting Epoch: "<<epoch
-                     <<", Learning Rate: "  <<lr
-                     <<", Cosine Counter: " <<cosineCounter
-                     <<", Cosine Interval: "<<cosineInterval
-                     <<std::endl;
+            std::cout << "Starting Epoch: "    << epoch
+                      << ", Learning Rate: "   << lr
+                      << ", Cosine Counter: "  << cosineCounter
+                      << ", Cosine Interval: " << cosineInterval
+                      << std::endl;
         }
         
         // Begin epoch
-        while (positionsSeen < epochSize){
+        while (positionsSeen < EPOCH_SIZE){
             // Initialize
-            std::thread threads[threadCount];
-            data *dat = dataLoader::currentData + dataLoader::position;
+            std::thread threads[THREAD_COUNT];
+            Data *dat = DataLoader::currentData + DataLoader::position;
             double batchError = 0;
 
             batchIterations++;
-            positionsSeen += batchSize;
+            positionsSeen += BATCH_SIZE;
 
-            for (int td = 0; td < threadCount; td++){
+            for (int td = 0; td < THREAD_COUNT; td++){
                 errorAccumulation[td] = 0;
                 threadGrad[td] = {};
             }
 
             // Proccess data in a multithreaded way
-            for (int td = 0; td < threadCount; td++){
+            for (int td = 0; td < THREAD_COUNT; td++){
                 threads[td] = std::thread(proccessData, td, dat);
             }
-            for (int td = 0; td < threadCount; td++){
+            for (int td = 0; td < THREAD_COUNT; td++){
                 threads[td].join();
             }
             
             // Accumulate error
-            for (int td = 0; td < threadCount; td++){
+            for (int td = 0; td < THREAD_COUNT; td++){
                 batchError += errorAccumulation[td];
             }
             epochError += batchError;
             iterationReportError += batchError;
 
             // Apply gradients with ADAM and multithreading
-            for (int td = 0; td < threadCount; td++){
+            for (int td = 0; td < THREAD_COUNT; td++){
                 threads[td] = std::thread(applyGradients, td, lr);
             }
-            for (int td = 0; td < threadCount; td++){
+            for (int td = 0; td < THREAD_COUNT; td++){
                 threads[td].join();
             }
 
             // Advance data loader index
-            dataLoader::advanceDataLoader();
+            DataLoader::advanceDataLoader();
 
             // Report info after certain number of iterations
             if (batchIterations % iterationReport == 0){
-                std::cout<<"Batch: "                   <<batchIterations
-                         <<", Iteration Report Error: "<<iterationReportError / (static_cast<long long>(batchSize) * iterationReport)
-                         <<", Epoch Average: "         <<epochError / (batchSize * batchIterations)
-                         <<", Time: "                  <<(getTime() - startTime) / 1000.0
-                         <<", Fens/s: "                <<(batchIterations * batchSize) / ((getTime() - epochStartTime) / 1000.0)
-                         <<std::endl;
+                std::cout << "Batch: "                    << batchIterations
+                          << ", Iteration Report Error: " << iterationReportError / (static_cast<long long>(BATCH_SIZE) * iterationReport)
+                          << ", Epoch Average: "          << epochError / (BATCH_SIZE * batchIterations)
+                          << ", Time: "                   << (getTime() - startTime) / 1000.0
+                          << ", Fens/s: "                 << (batchIterations * BATCH_SIZE) / ((getTime() - epochStartTime) / 1000.0)
+                          << std::endl;
                 
                 iterationReportError = 0;
             }
         }
         
         // Print average error after each epoch
-        std::cout<<"Finished Epoch: "   <<epoch
-                 <<", Error: "  <<epochError / (batchSize * batchIterations)
-                 <<std::endl;
+        std::cout << "Finished Epoch: " << epoch
+                  << ", Error: "        << epochError / (BATCH_SIZE * batchIterations)
+                  << std::endl;
 
-        outputLoss<<epoch<<" "<<epochError / (batchSize * batchIterations)<<std::endl;
+        outputLoss << epoch << " " << epochError / (BATCH_SIZE * batchIterations) << std::endl;
 
         // Export networks
         exportNetworkCheckpoint();
         exportNetworkQuantized();
         
-        // Exponential learning rate decay (do at the end of [1...lrTransition) epochs)
-        if (epoch < lrTransition){
-            lr *= lrDecay;
+        // Exponential learning rate decay (do at the end of [1...LR_TRANSITION) epochs)
+        if (epoch < LR_TRANSITION){
+            lr *= LR_DECAY;
         }
         // Cosine annealing
         else{
             if (cosineCounter == cosineInterval){
                 cosineCounter = 0;
-                cosineInterval *= cosineIntervalMultiplier;
+                cosineInterval *= COSINE_INTERVAL_MULTIPLIER;
             }
             else{
                 cosineCounter++;
             }
             // Adjust learning rate
-            lr = cosineMin + 0.5 * (cosineMax - cosineMin) * (1.0 + static_cast<double>(cos(static_cast<double>(cosineCounter) / static_cast<double>(cosineInterval) * 3.14159265)));
+            lr = COSINE_MIN + 0.5 * (COSINE_MAX - COSINE_MIN) * (1.0 + static_cast<double>(cos(static_cast<double>(cosineCounter) / static_cast<double>(cosineInterval) * 3.14159265)));
         }
     }
 }
